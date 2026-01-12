@@ -1,13 +1,13 @@
-# ingest_to_neo4j.py
 import json
 from neo4j import GraphDatabase
 
-# Connexion Neo4j
-URI = "bolt://localhost:7687"
+URI = ""
 USER = "neo4j"
-PASSWORD = "12345678"
+PASSWORD = ""
 
 driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
+driver.verify_connectivity()
+print("Connected to Neo4j Aura successfully")
 
 
 # ----------------------------------------------------------
@@ -148,38 +148,51 @@ with open("cve_data.json", encoding="utf-8") as f:
     data = json.load(f)
 
 vulns = data.get("vulnerabilities", [])
+total = len(vulns)
+print(f"Found {total} vulnerabilities to process")
 
 with driver.session() as session:
-    for item in vulns:
-        cve = item["cve"]
+    processed = 0
+    errors = 0
+    
+    for idx, item in enumerate(vulns, 1):
+        try:
+            cve = item["cve"]
+            cve_id = cve["id"]
+            description = cve["descriptions"][0]["value"]
+            published = cve["published"]
+            modified = cve["lastModified"]
 
-        cve_id = cve["id"]
-        description = cve["descriptions"][0]["value"]
-        published = cve["published"]
-        modified = cve["lastModified"]
+            session.execute_write(create_cve, cve_id, description, published, modified)
 
-        session.execute_write(create_cve, cve_id, description, published, modified)
+            base, exploit, impact, vector = extract_cvss(item)
+            if base is not None:
+                session.execute_write(create_metric, cve_id, base, exploit, impact, vector)
 
-        # Metrics
-        base, exploit, impact, vector = extract_cvss(item)
-        if base is not None:
-            session.execute_write(create_metric, cve_id, base, exploit, impact, vector)
-
-        # Produits + Vendors
-        products, vendors = extract_products_and_vendors(item)
-        for p in products:
-            session.execute_write(create_product, cve_id, p)
-        for v in vendors:
-            session.execute_write(create_vendor, v)
+            products, vendors = extract_products_and_vendors(item)
             for p in products:
-                session.execute_write(link_vendor_product, v, p)
+                session.execute_write(create_product, cve_id, p)
+            for v in vendors:
+                session.execute_write(create_vendor, v)
+                for p in products:
+                    session.execute_write(link_vendor_product, v, p)
 
-        # Références
-        for url, source in extract_references(item):
-            session.execute_write(create_reference, cve_id, url, source)
+            for url, source in extract_references(item):
+                session.execute_write(create_reference, cve_id, url, source)
 
-        # CWE weaknesses
-        for cwe in extract_cwes(item):
-            session.execute_write(create_cwe, cve_id, cwe)
+            for cwe in extract_cwes(item):
+                session.execute_write(create_cwe, cve_id, cwe)
+            
+            processed += 1
+            if idx % 100 == 0:
+                print(f"Processed {idx}/{total} vulnerabilities...")
+                
+        except Exception as e:
+            errors += 1
+            print(f"Error processing {cve_id if 'cve_id' in locals() else 'unknown'}: {e}")
+            if errors > 10:
+                print("Too many errors, stopping...")
+                break
 
-print("IMPORT TERMINÉ AVEC VENDOR, REFERENCE, CWE, METRICS COMPLETS !")
+driver.close()
+print(f"IMPORT TERMINÉ: {processed} processed, {errors} errors")
